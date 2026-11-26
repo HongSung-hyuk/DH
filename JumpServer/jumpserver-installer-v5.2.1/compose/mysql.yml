@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: jms_mysql
+    restart: always
+    command: --character-set-server=utf8
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DB_PORT: $DB_PORT
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-}
+      MYSQL_DATABASE: $DB_NAME
+      MYSQL_USER: $DB_USER
+      MYSQL_PASSWORD: $DB_PASSWORD
+    volumes:
+      - ${CONFIG_DIR}/mysql/my.cnf:/etc/mysql/my.cnf
+      - ${VOLUME_DIR}/mysql/data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$$MYSQL_PASSWORD" mysql -h127.0.0.1 -P"$$DB_PORT"
+          -u"$$MYSQL_USER" --database="$$MYSQL_DATABASE" -e 'SELECT 1;'
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - net

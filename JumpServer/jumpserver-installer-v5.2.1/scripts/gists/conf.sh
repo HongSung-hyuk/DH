@@ -1,0 +1,297 @@
+
+function has_config() {
+  local key=$1
+  if [[ "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] && \
+    grep -Eq "^[[:space:]]*${key}=" "${CONFIG_FILE}" 2>/dev/null; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+function get_config() {
+  local key=$1
+  local default=${2-''}
+  local line value=''
+
+  if [[ ! "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    printf '%s\n' "${default}"
+    return 1
+  fi
+
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ "${line}" =~ ^[[:space:]]*${key}= ]]; then
+        value=${line#*=}
+      fi
+    done <"${CONFIG_FILE}"
+  fi
+
+  if [[ -z "$value" ]];then
+    value="$default"
+  fi
+  echo "${value}"
+}
+
+function get_config_or_env() {
+  local key=$1
+  local value=''
+  local default=${2-''}
+
+  # Bash supports ${!key}, but zsh reports "bad substitution" when this
+  # helper is called from an interactive shell. The installer only passes
+  # configuration variable names here, so use a validated, portable indirect
+  # expansion instead.
+  if [[ "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    eval "value=\${${key}:-}"
+  fi
+  if [[ -z "$value" && -f "${CONFIG_FILE}" ]];then
+    value=$(get_config "$key")
+  fi
+
+  if [[ -z "$value" ]];then
+    value="$default"
+  fi
+  echo "${value}"
+}
+
+CONFIG_SAFE_EXCLUDES="DB_HOST DB_PORT DB_PASSWORD MYSQL_ROOT_PASSWORD MARIADB_ROOT_PASSWORD VAULT_OPENBAO_TOKEN SSH_CA_OPENBAO_TOKEN"
+
+function is_config_excluded() {
+  local key=$1
+  local excluded
+
+  for excluded in ${CONFIG_SAFE_EXCLUDES}; do
+    if [[ "${key}" == "${excluded}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+function gen_safe_config() {
+  local base_config_file=${CONFIG_FILE}
+  local output_file=${CONFIG_SAFE_FILE}
+  local tmp_file="${output_file}.tmp.$$"
+  local excluded
+
+  mkdir -p "${CONFIG_DIR}"
+  if [[ -f "${base_config_file}" ]]; then
+    cp "${base_config_file}" "${tmp_file}"
+    for excluded in ${CONFIG_SAFE_EXCLUDES}; do
+      sed_in_place "/^[[:space:]]*${excluded}=/d" "${tmp_file}"
+    done
+    if [[ "$(get_config_or_env USE_XPACK)" != "1" ]]; then
+      # CE cannot run the local worker. Do not let a stale EE setting make KoKo
+      # submit recordings to a worker when the installation is switched to CE.
+      sed_in_place '/^[[:space:]]*ENABLE_VIDEO_WORKER=/d' "${tmp_file}"
+      printf '%s\n' 'ENABLE_VIDEO_WORKER=false' >>"${tmp_file}"
+    fi
+  else
+    : >"${tmp_file}"
+  fi
+
+  if [[ -f "${output_file}" ]] && cmp -s "${tmp_file}" "${output_file}"; then
+    rm -f "${tmp_file}"
+    echo "${output_file}"
+    return
+  fi
+
+  mv -f "${tmp_file}" "${output_file}"
+  chmod 600 "${output_file}" 2>/dev/null || true
+  echo "${output_file}"
+}
+
+function sed_in_place() {
+  # macOS requires a backup extension for sed -i, even if empty
+  if [[ "${OS}" == "Darwin" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
+function set_config() {
+  local key=$1
+  local value=$2
+  local line origin_value tmp_file
+  local replaced=0
+
+  if [[ ! "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    printf 'Invalid configuration key: %s\n' "${key}" >&2
+    return 1
+  fi
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    printf 'Configuration values must be a single line: %s\n' "${key}" >&2
+    return 1
+  fi
+
+  origin_value=$(get_config "${key}")
+  if [[ "$(has_config "${key}")" == "1" && "${value}" == "${origin_value}" ]]; then
+    return
+  fi
+
+  mkdir -p "$(dirname "${CONFIG_FILE}")" || return 1
+  tmp_file=$(mktemp "${CONFIG_FILE}.tmp.XXXXXX") || return 1
+
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ "${line}" =~ ^[[:space:]]*${key}= ]]; then
+        if [[ "${replaced}" == "0" ]]; then
+          printf '%s=%s\n' "${key}" "${value}"
+          replaced=1
+        fi
+      else
+        printf '%s\n' "${line}"
+      fi
+    done <"${CONFIG_FILE}" >"${tmp_file}"
+  fi
+
+  if [[ "${replaced}" == "0" ]]; then
+    printf '%s=%s\n' "${key}" "${value}" >>"${tmp_file}"
+  fi
+  chmod 600 "${tmp_file}" 2>/dev/null || true
+  mv -f "${tmp_file}" "${CONFIG_FILE}"
+}
+
+function remove_config() {
+  key=$1
+
+  has=$(has_config "${key}")
+  if [[ ${has} == "1" ]]; then
+    sed_in_place "/^[ \t]*${key}=.*$/d" "${CONFIG_FILE}"
+  fi
+}
+
+function disable_config() {
+  key=$1
+
+  has=$(has_config "${key}")
+  if [[ ${has} == "1" ]]; then
+    sed_in_place "s,^[ \t]*${key}=.*$,# ${key}=,g" "${CONFIG_FILE}"
+  fi
+}
+
+
+function get_config_enabled() {
+  key=$1
+  value=$(get_config "${key}")
+  if [[ "${value}" == "0" || "${value}" == "false" || "${value}" == "False" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+
+function prepare_jmsctl() {
+  if check_root; then
+    echo -e "#!/usr/bin/env bash\n#" > /usr/bin/jmsctl
+    echo -e "cd ${PROJECT_DIR}" >> /usr/bin/jmsctl
+    echo -e './jmsctl.sh $@' >> /usr/bin/jmsctl
+    chmod 755 /usr/bin/jmsctl
+  fi
+}
+
+
+function prepare_config() {
+  local database_config database_config_name
+  cd "${PROJECT_DIR}" || exit 1
+  prepare_jmsctl
+
+  echo_yellow "1. $(gettext 'Check Configuration File')"
+  echo "$(gettext 'Path to Configuration file'): ${CONFIG_DIR}"
+  if [[ ! -d ${CONFIG_DIR} ]]; then
+    mkdir -p "${CONFIG_DIR}"
+    cp config-example.txt "${CONFIG_FILE}"
+  fi
+  if [[ ! -f ${CONFIG_FILE} ]]; then
+    cp config-example.txt "${CONFIG_FILE}"
+  else
+    echo_check "${CONFIG_FILE}"
+  fi
+  if [[ ! -f ".env" ]]; then
+    ln -s "${CONFIG_FILE}" .env
+  fi
+  if [[ ! -f "./compose/.env" ]]; then
+    ln -s "${CONFIG_FILE}" ./compose/.env
+  fi
+
+  # Docker may have created a directory for a missing bind-mounted file.
+  # Replace only an empty placeholder; keep anything else for inspection.
+  for database_config_name in mariadb/mariadb.cnf mysql/my.cnf; do
+    database_config="${CONFIG_DIR}/${database_config_name}"
+    if [[ -L "${database_config}" ]]; then
+      log_error "Database configuration must not be a symlink: ${database_config}"
+      exit 1
+    elif [[ -d "${database_config}" ]]; then
+      if ! rmdir "${database_config}"; then
+        log_error "Database configuration path is a non-empty directory: ${database_config}"
+        exit 1
+      fi
+    elif [[ -e "${database_config}" && ! -f "${database_config}" ]]; then
+      log_error "Database configuration path is not a regular file: ${database_config}"
+      exit 1
+    fi
+  done
+
+  # shellcheck disable=SC2045
+  for d in $(ls "${PROJECT_DIR}/config_init"); do
+    if [[ -d "${PROJECT_DIR}/config_init/${d}" ]]; then
+      for f in $(ls "${PROJECT_DIR}/config_init/${d}"); do
+        if [[ -f "${PROJECT_DIR}/config_init/${d}/${f}" ]]; then
+          if [[ ! -f "${CONFIG_DIR}/${d}/${f}" ]]; then
+            \cp -rf "${PROJECT_DIR}/config_init/${d}" "${CONFIG_DIR}"
+          else
+            echo_check "${CONFIG_DIR}/${d}/${f}"
+          fi
+        fi
+      done
+    fi
+  done
+
+  nginx_cert_dir="${CONFIG_DIR}/nginx/cert"
+  nginx_cert_file="${nginx_cert_dir}/server.crt"
+  nginx_key_file="${nginx_cert_dir}/server.key"
+  mkdir -p "${nginx_cert_dir}"
+  if [[ ! -f "${nginx_cert_file}" && ! -f "${nginx_key_file}" ]]; then
+    if ! command -v openssl >/dev/null 2>&1; then
+      log_error "$(gettext 'OpenSSL is required to generate the initial Nginx certificate')"
+      exit 1
+    fi
+    if ! openssl_output=$(openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
+      -keyout "${nginx_key_file}" \
+      -out "${nginx_cert_file}" \
+      -subj "/CN=localhost" 2>&1); then
+      log_error "${openssl_output}"
+      exit 1
+    fi
+  elif [[ ! -f "${nginx_cert_file}" || ! -f "${nginx_key_file}" ]]; then
+    log_error "$(gettext 'Nginx certificate and private key must both exist')"
+    exit 1
+  else
+    echo_check "${nginx_cert_file}"
+    echo_check "${nginx_key_file}"
+  fi
+  chmod 700 "${CONFIG_DIR}/../"
+  find "${CONFIG_DIR}" -type d -exec chmod 700 {} \;
+  find "${CONFIG_DIR}" -type f -exec chmod 600 {} \;
+  chmod 644 "${CONFIG_DIR}/redis/redis.conf"
+  for database_config_name in mariadb/mariadb.cnf mysql/my.cnf; do
+    database_config="${CONFIG_DIR}/${database_config_name}"
+    if [[ ! -f "${database_config}" || -L "${database_config}" ]]; then
+      log_error "Database configuration file is missing or invalid: ${database_config}"
+      exit 1
+    fi
+    chmod 644 "${database_config}"
+  done
+  if [[ -f "${CONFIG_DIR}/openbao/server.hcl" ]]; then
+    chmod 644 "${CONFIG_DIR}/openbao/server.hcl"
+  fi
+
+  if [[ "$(uname -m)" == "aarch64" ]]; then
+    sed_in_place "s/# ignore-warnings ARM64-COW-BUG/ignore-warnings ARM64-COW-BUG/g" "${CONFIG_DIR}/redis/redis.conf"
+  fi
+
+  gen_safe_config >/dev/null
+}

@@ -1,0 +1,10 @@
+FROM jumpserver/core:v5.2.1-ce
+
+COPY apps/jumpserver/conf.py /opt/jumpserver/apps/jumpserver/conf.py
+COPY apps/jumpserver/settings/custom.py /opt/jumpserver/apps/jumpserver/settings/custom.py
+COPY apps/authentication/api/connection_token.py /opt/jumpserver/apps/authentication/api/connection_token.py
+COPY apps/authentication/models/connection_token.py /opt/jumpserver/apps/authentication/models/connection_token.py
+COPY apps/authentication/services/connection_acl.py /opt/jumpserver/apps/authentication/services/connection_acl.py
+COPY apps/authentication/services/connection_acl_batch.py /opt/jumpserver/apps/authentication/services/connection_acl_batch.py
+COPY apps/settings/api/settings.py /opt/jumpserver/apps/settings/api/settings.py
+COPY apps/settings/serializers/security.py /opt/jumpserver/apps/settings/serializers/security.py

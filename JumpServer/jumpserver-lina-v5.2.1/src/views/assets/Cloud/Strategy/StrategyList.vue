@@ -1,0 +1,101 @@
+<template>
+  <DrawerListTable
+    :create-drawer="createDrawer"
+    :detail-drawer="detailDrawer"
+    :header-actions="headerActions"
+    :table-config="tableConfig"
+  />
+</template>
+
+<script>
+import { DrawerListTable } from '@/components'
+import { DetailFormatter } from '@/components/Table/TableFormatters'
+
+export default {
+  name: 'StrategyList',
+  components: {
+    DrawerListTable
+  },
+  data() {
+    return {
+      createDrawer: () => import('@/views/assets/Cloud/Strategy/StrategyCreateUpdate.vue'),
+      detailDrawer: () => import('@/views/assets/Cloud/Strategy/StrategyDetail/index.vue'),
+      tableConfig: {
+        url: '',
+        permissions: {
+          app: 'xpack',
+          resource: 'strategy'
+        },
+        columns: [
+          'name',
+          'priority',
+          'strategy_rules',
+          'strategy_actions',
+          'actions',
+          'rule_relation'
+        ],
+        columnsMeta: {
+          name: {
+            formatter: DetailFormatter,
+            formatterArgs: {
+              route: 'CloudStrategyDetail'
+            }
+          },
+          strategy_rules: {
+            label: this.$t('Rule'),
+            formatter: (row) => {
+              return row.strategy_rules.length
+            }
+          },
+          strategy_actions: {
+            label: this.$t('Action'),
+            formatter: (row) => {
+              return row.strategy_actions.length
+            }
+          },
+          rule_relation: {
+            label: this.$t('RuleRelation'),
+            formatter: (row) => {
+              const value = row.rule_relation?.value || row.rule_relation
+              return this.$t(value === 'or' ? 'Or' : 'And')
+            }
+          },
+          actions: {
+            formatterArgs: {
+              updateRoute: 'CloudStrategyUpdate',
+              hasClone: false,
+              canDelete: ({ row }) => {
+                return this.$hasPerm('xpack.delete_strategy') && row.name !== 'default'
+              },
+              canUpdate: ({ row }) => {
+                return (
+                  this.$hasPerm('xpack.change_strategy') &&
+                  row.name !== 'default' &&
+                  !this.$store.getters.currentOrgIsRoot
+                )
+              }
+            }
+          }
+        }
+      },
+      headerActions: {
+        hasImport: false,
+        hasExport: false,
+        hasMoreActions: false,
+        createRoute: 'CloudStrategyCreate'
+      }
+    }
+  },
+  computed: {
+    iCategory() {
+      return this.$route.query.category || 'host'
+    }
+  },
+  mounted() {
+    this.tableConfig.url = `/api/v1/xpack/cloud/strategies/?category=${this.iCategory}`
+  },
+  methods: {}
+}
+</script>
+
+<style lang="scss" scoped></style>

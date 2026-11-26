@@ -1,0 +1,23 @@
+name: jumpserver-password-rotator
+services:
+  rotator:
+    build: .
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: unless-stopped
+    command: ["run"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./config:/config:ro,z
+      - ./secrets:/secrets:ro,z
+      - ./state:/state:rw,z
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

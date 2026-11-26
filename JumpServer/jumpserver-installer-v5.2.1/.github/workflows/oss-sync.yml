@@ -1,0 +1,127 @@
+name: Sync Docker Binaries to OSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_version:
+        description: 'Docker version (blank: keep current)'
+        type: string
+      docker_compose_version:
+        description: 'Compose version, with or without v (blank: keep current)'
+        type: string
+  push:
+    branches: [dev, master, main, 'v*']
+    paths: [scripts/const.sh, .github/workflows/oss-sync.yml]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: docker-binaries-oss
+  cancel-in-progress: false
+
+env:
+  OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
+  OSS_REGION: cn-beijing
+  OSS_BUCKET: jms-pkg
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[docker-mirror-synced]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PRIVATE_TOKEN || github.token }}
+
+      - name: Download binaries and update const.sh
+        env:
+          DOCKER_INPUT: ${{ inputs.docker_version }}
+          COMPOSE_INPUT: ${{ inputs.docker_compose_version }}
+        run: |
+          set -euo pipefail
+          unset DOCKER_BIN_HOST DOCKER_IMAGE_MIRROR
+          . scripts/const.sh
+          docker_version=${DOCKER_INPUT:-${DOCKER_VERSION}}
+          docker_version=${docker_version#v}
+          compose_version=${COMPOSE_INPUT:-${DOCKER_COMPOSE_VERSION}}
+          compose_version=${compose_version#v}
+          for version in "${docker_version}" "${compose_version}"; do
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$ ]] || { echo "Invalid version: ${version}"; exit 1; }
+          done
+          compose_version="v${compose_version}"
+          if [[ ( -n "${DOCKER_INPUT}" || -n "${COMPOSE_INPUT}" ) && "${GITHUB_REF_TYPE}" != branch ]]; then
+            echo 'Select a branch to update const.sh.'
+            exit 1
+          fi
+
+          for arch in x86_64 aarch64; do
+            export BUILD_ARCH=${arch}
+            . scripts/const.sh
+            for component in docker compose; do
+              if [[ "${component}" == docker ]]; then
+                version=${docker_version} current=${DOCKER_VERSION}
+                key=DOCKER_BIN_SHA256 expected=${DOCKER_BIN_SHA256}
+                url="https://download.docker.com/linux/static/stable/${arch}/docker-${version}.tgz"
+              else
+                version=${compose_version} current=${DOCKER_COMPOSE_VERSION}
+                key=COMPOSE_BIN_SHA256 expected=${COMPOSE_BIN_SHA256}
+                url="https://github.com/docker/compose/releases/download/${version}/docker-compose-linux-${arch}"
+              fi
+              path=${url#https://}
+              file="${RUNNER_TEMP}/docker-mirror/${path#*/}"
+              mkdir -p "$(dirname "${file}")"
+              curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 "${url}" -o "${file}"
+              sha=$(sha256sum "${file}" | awk '{print $1}')
+              if [[ "${version}" == "${current}" && "${sha}" != "${expected}" ]]; then
+                echo "SHA-256 verification failed: ${url}"
+                exit 1
+              fi
+              echo "${sha}" > "${file}.sha256"
+              md5sum "${file}" | awk '{print $1}' > "${file}.md5"
+              sed -i -E "s/^  [^:]+:${arch}\) ${key}=.* ;;/  ${version}:${arch}) ${key}=${sha} ;;/" scripts/const.sh
+            done
+          done
+          sed -i -E "s/^export DOCKER_VERSION=.*/export DOCKER_VERSION=${docker_version}/; s/^export DOCKER_COMPOSE_VERSION=.*/export DOCKER_COMPOSE_VERSION=${compose_version}/" scripts/const.sh
+          bash -n scripts/const.sh
+
+      - name: Install ossutil
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/ossutil.zip"
+          curl -fsSL --retry 3 --max-time 300 \
+            https://gosspublic.alicdn.com/ossutil/v2/2.4.0/ossutil-2.4.0-linux-amd64.zip -o "${archive}"
+          echo "85edf66b2fb7238f5c7e25cab820cf29312319fe4935b7c86a6b8485eb434f3c  ${archive}" | sha256sum --check
+          unzip -q "${archive}" -d "${RUNNER_TEMP}/ossutil"
+          chmod +x "${RUNNER_TEMP}/ossutil/ossutil-2.4.0-linux-amd64/ossutil"
+          echo "${RUNNER_TEMP}/ossutil/ossutil-2.4.0-linux-amd64" >> "${GITHUB_PATH}"
+
+      - name: Upload to OSS
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          : "${OSS_ACCESS_KEY_ID:?Set OSS_ACCESS_KEY_ID in repository secrets}"
+          : "${OSS_ACCESS_KEY_SECRET:?Set OSS_ACCESS_KEY_SECRET in repository secrets}"
+          ossutil cp -rf "${RUNNER_TEMP}/docker-mirror/" "oss://${OSS_BUCKET}/"
+
+      - name: Create version update PR
+        if: github.event_name == 'workflow_dispatch' && (inputs.docker_version != '' || inputs.docker_compose_version != '')
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          git diff --quiet -- scripts/const.sh && exit 0
+          branch="pr@${GITHUB_REF_NAME}@docker-versions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "${branch}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- scripts/const.sh
+          git commit -m 'chore: update Docker and Compose versions [docker-mirror-synced]'
+          git push -u origin "${branch}"
+          gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" \
+            --title 'chore: update Docker and Compose versions' \
+            --body 'Update the versions and SHA-256 in const.sh after successfully uploading the binaries to OSS.' \
+            || gh pr view "${branch}" --json url --jq .url

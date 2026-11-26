@@ -1,0 +1,3 @@
+[submodule "JumpServer/jumpserver-ce-v5.2.1/apps/accounts/clients"]
+	path = JumpServer/jumpserver-ce-v5.2.1/apps/accounts/clients
+	url = https://github.com/jumpserver/pam-clients.git

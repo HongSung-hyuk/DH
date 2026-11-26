@@ -1,0 +1,491 @@
+import type { EffectScope } from "vue";
+import type { AssetItem, AssetTreeNode } from "~/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { effectScope, nextTick, reactive, ref } from "vue";
+import {
+  applyAssetRename,
+  assetTreeCheckStates,
+  collectAssetTreeBranch,
+  hasAssetName,
+  unwrapTypeTreeRoot,
+  useAssetTree,
+  useAssetTreeSearch
+} from "./useAssetTree";
+
+describe("batch selection", () => {
+  const leaf = (id: string, data = { id }) => ({ id, name: id, meta: { data } });
+  const branch = (id: string, children?: AssetTreeNode[]): AssetTreeNode => ({
+    id,
+    name: id,
+    isParent: true,
+    open: false,
+    loaded: Boolean(children),
+    children
+  });
+  const selection = (...ids: string[]) => new Map(ids.map((id) => [id, { id } as AssetItem]));
+
+  it("collects a collapsed subtree across pages and counts duplicate assets once", async () => {
+    const child = branch("child");
+    const root = branch("root", [child, leaf("one")]);
+    root.nextPage = { phase: "assets", assetOffset: 1 };
+    const loadPage = vi.fn(async (node: AssetTreeNode) => {
+      node.children = [
+        ...(node.children || []),
+        ...(node === child ? [leaf("alias", { id: "one" }), { ...leaf("disabled"), chkDisabled: true }] : [leaf("two")])
+      ];
+      node.loaded = true;
+      node.nextPage = null;
+    });
+
+    expect(assetTreeCheckStates([root], selection("one")).get(root)).toBe("indeterminate");
+    const assets = await collectAssetTreeBranch(root, loadPage, () => true);
+    expect([...assets!.keys()]).toEqual(["one", "two"]);
+    expect(loadPage.mock.calls.map(([node]) => node.id)).toEqual(["child", "root"]);
+    expect(root.open).toBe(false);
+    expect(child.open).toBe(false);
+    expect(assetTreeCheckStates([root], selection("one", "two")).get(root)).toBe(true);
+    expect(assetTreeCheckStates([root], selection("two")).get(root)).toBe("indeterminate");
+  });
+
+  it("continues loading the group after more than 20 assets have been selected", async () => {
+    const root = branch(
+      "large",
+      Array.from({ length: 21 }, (_, index) => leaf(`asset-${index}`))
+    );
+    root.nextPage = { phase: "assets", assetOffset: 21 };
+    const loadPage = vi.fn(async (node: AssetTreeNode) => {
+      node.children?.push(leaf("last"));
+      node.nextPage = null;
+    });
+
+    const assets = await collectAssetTreeBranch(root, loadPage, () => true);
+
+    expect(loadPage).toHaveBeenCalledExactlyOnceWith(root);
+    expect(assets?.size).toBe(22);
+    expect(assets?.has("last")).toBe(true);
+  });
+
+  it("discards an in-flight selection when the batch context changes", async () => {
+    const root = branch("root");
+    let active = true;
+    const loadPage = vi.fn(async () => {
+      await Promise.resolve();
+      root.loaded = true;
+      root.children = [leaf("one")];
+    });
+    const pending = collectAssetTreeBranch(root, loadPage, () => active);
+    active = false;
+    expect(await pending).toBeNull();
+    expect(loadPage).toHaveBeenCalledOnce();
+  });
+});
+
+describe("applyAssetRename", () => {
+  it("renames matching leaves in place and leaves parents open", () => {
+    const nodes: AssetTreeNode[] = [
+      {
+        id: "folder-1",
+        name: "Linux",
+        isParent: true,
+        open: true,
+        children: [
+          { id: "node-1", key: "asset-1", name: "old", meta: { data: { id: "asset-1", name: "old" } } },
+          { id: "node-2", key: "asset-2", name: "other", meta: { data: { id: "asset-2", name: "other" } } }
+        ]
+      }
+    ];
+
+    applyAssetRename(nodes, "asset-1", "new");
+
+    expect(nodes[0]).toMatchObject({ name: "Linux", open: true });
+    expect(nodes[0]!.children?.[0]).toMatchObject({ name: "new", meta: { data: { name: "new" } } });
+    expect(nodes[0]!.children?.[1]).toMatchObject({ name: "other" });
+  });
+});
+
+describe("asset rename names", () => {
+  const nodes: AssetTreeNode[] = [
+    {
+      id: "folder-1",
+      name: "Linux",
+      isParent: true,
+      children: [{ id: "node-1", key: "asset-1", name: "web-1", meta: { data: { id: "asset-1", name: "web-1" } } }]
+    }
+  ];
+
+  it("detects duplicate leaf names and ignores the asset being renamed", () => {
+    expect(hasAssetName(nodes, "web-1")).toBe(true);
+    expect(hasAssetName(nodes, " WEB-1 ")).toBe(true);
+    expect(hasAssetName(nodes, "web-1", "asset-1")).toBe(false);
+  });
+});
+
+describe("unwrapTypeTreeRoot", () => {
+  it("removes the empty API root instead of leaving it expandable", () => {
+    const nodes = [{ id: "ROOT", name: "All types", isParent: true, level: 0 }] as AssetTreeNode[];
+
+    expect(unwrapTypeTreeRoot(nodes)).toEqual([]);
+  });
+
+  it("promotes root children and resets their levels", () => {
+    const nodes = [
+      {
+        id: "ROOT",
+        name: "All types",
+        isParent: true,
+        level: 0,
+        children: [
+          {
+            id: "ROOT_HOST",
+            name: "Host",
+            isParent: true,
+            level: 1,
+            children: [{ id: "ROOT_HOST_LINUX", name: "Linux", isParent: true, level: 2 }]
+          }
+        ]
+      }
+    ] as AssetTreeNode[];
+
+    expect(unwrapTypeTreeRoot(nodes)).toMatchObject([
+      { id: "ROOT_HOST", level: 0, children: [{ id: "ROOT_HOST_LINUX", level: 1 }] }
+    ]);
+  });
+});
+
+const userInfoStore = reactive({
+  loggedIn: true,
+  orgId: "org-1",
+  currentSite: "site-1",
+  currentAccountId: "user-1",
+  getConnectionInfoForAsset: () => undefined
+});
+vi.mock("~/store/modules/userInfo", () => ({ useUserInfoStore: () => userInfoStore }));
+
+describe("asset tree search", () => {
+  let scope: EffectScope;
+  const getAssetTree = vi.fn();
+  const getAuthorizedAssets = vi.fn();
+  const getUserAssetTreeMetrics = vi.fn();
+  const onResults = vi.fn();
+  const onError = vi.fn();
+
+  const startSearch = (initialQuery = "production") => {
+    const query = ref(initialQuery);
+    const search = scope.run(() => useAssetTreeSearch(() => query.value, { onResults, onError }))!;
+    return { query, ...search };
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    vi.stubGlobal("getAssetTree", getAssetTree);
+    vi.stubGlobal("getAuthorizedAssets", getAuthorizedAssets);
+    vi.stubGlobal("getUserAssetTreeMetrics", getUserAssetTreeMetrics);
+    Object.assign(userInfoStore, { loggedIn: true, orgId: "org-1", currentSite: "site-1", currentAccountId: "user-1" });
+    getAuthorizedAssets.mockResolvedValue({ results: [{ id: "asset-1", name: "Production" }], next: null });
+    scope = effectScope();
+  });
+
+  afterEach(() => {
+    scope.stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("acknowledges the initial search and stops loading when the assets arrive", async () => {
+    const search = startSearch("  production  ");
+    expect(search.loading.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(getAuthorizedAssets).toHaveBeenCalledExactlyOnceWith(
+      {
+        search: "production",
+        limit: 999,
+        offset: 0,
+        fields: "id,name,address,comment,org_id,is_active,platform,category,type,nodes"
+      },
+      undefined
+    );
+    expect(onResults).toHaveBeenCalledExactlyOnceWith("production", search.nodes.value);
+    expect(search.nodes.value).toMatchObject([{ id: "asset-1" }]);
+    expect(search.completedQuery.value).toBe("production");
+    expect(search.loading.value).toBe(false);
+  });
+
+  it("cancels the debounce and resets loading when the search is cleared", async () => {
+    const search = startSearch();
+    search.query.value = "staging";
+    await nextTick();
+    search.query.value = "";
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(getAuthorizedAssets).not.toHaveBeenCalled();
+    expect(search.loading.value).toBe(false);
+    expect(search.nodes.value).toEqual([]);
+  });
+
+  it("ignores an older response without clearing the current search's loading state", async () => {
+    const oldRequest = Promise.withResolvers<unknown>();
+    const newRequest = Promise.withResolvers<unknown>();
+    getAuthorizedAssets.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
+    const search = startSearch();
+    await vi.advanceTimersByTimeAsync(250);
+    search.query.value = "staging";
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(250);
+
+    oldRequest.resolve({ results: [{ id: "old-asset" }], next: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onResults).not.toHaveBeenCalled();
+    expect(search.loading.value).toBe(true);
+
+    newRequest.resolve({ results: [{ id: "new-asset" }], next: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(search.nodes.value).toMatchObject([{ id: "new-asset" }]);
+    expect(search.completedQuery.value).toBe("staging");
+    expect(search.loading.value).toBe(false);
+  });
+
+  it.each(["orgId", "currentSite", "currentAccountId"] as const)(
+    "repeats the search after %s changes and ignores stale failures",
+    async (key) => {
+      const oldRequest = Promise.withResolvers<unknown>();
+      getAuthorizedAssets.mockReturnValueOnce(oldRequest.promise);
+      const search = startSearch();
+      await vi.advanceTimersByTimeAsync(250);
+      userInfoStore[key] = "changed";
+      await nextTick();
+      oldRequest.reject(new Error("Previous context failed"));
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(getAuthorizedAssets).toHaveBeenCalledTimes(2);
+      expect(onError).not.toHaveBeenCalled();
+      expect(onResults).toHaveBeenCalledOnce();
+      expect(search.loading.value).toBe(false);
+    }
+  );
+
+  it("clears results on logout and searches again on login", async () => {
+    const search = startSearch();
+    await vi.advanceTimersByTimeAsync(250);
+    userInfoStore.loggedIn = false;
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(search.nodes.value).toEqual([]);
+    expect(search.completedQuery.value).toBe("");
+    expect(search.loading.value).toBe(false);
+    expect(getAuthorizedAssets).toHaveBeenCalledOnce();
+
+    userInfoStore.loggedIn = true;
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(getAuthorizedAssets).toHaveBeenCalledTimes(2);
+    expect(search.nodes.value).toMatchObject([{ id: "asset-1" }]);
+  });
+
+  it("reports a failed request and stops loading", async () => {
+    const error = new Error("Search request failed");
+    getAuthorizedAssets.mockRejectedValueOnce(error);
+    const search = startSearch();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith("production", error);
+    expect(onResults).not.toHaveBeenCalled();
+    expect(search.completedQuery.value).toBe("");
+    expect(search.loading.value).toBe(false);
+  });
+
+  it("ignores an in-flight request after the tree is unmounted", async () => {
+    const request = Promise.withResolvers<unknown>();
+    getAuthorizedAssets.mockReturnValueOnce(request.promise);
+    const search = startSearch();
+    await vi.advanceTimersByTimeAsync(250);
+    scope.stop();
+    request.resolve({ results: [{ id: "asset-1" }], next: null });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onResults).not.toHaveBeenCalled();
+    expect(search.nodes.value).toEqual([]);
+  });
+
+  it("keeps all parent nodes and connection fields when searching across server pages", async () => {
+    const asset = {
+      id: "asset-1",
+      name: "web-1",
+      address: "10.0.0.1",
+      comment: "Production web server",
+      org_id: "org-1",
+      is_active: false,
+      platform: { id: 1, name: "Ubuntu" },
+      category: { value: "host" },
+      type: { value: "linux" },
+      nodes: [
+        { id: "node-1", name: "Production" },
+        { id: "node-2", name: "Web" }
+      ]
+    };
+    getAuthorizedAssets
+      .mockResolvedValueOnce({ results: [asset], next: "/next" })
+      .mockResolvedValueOnce({ results: [{ id: "asset-2", name: "web-2" }], next: null });
+    const { fetchTree, treeNodeToAsset } = useAssetTree();
+    const nodes = await fetchTree("search", undefined, "web");
+
+    expect(getAuthorizedAssets).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ limit: 998, offset: 1 }),
+      undefined
+    );
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0]).toMatchObject({
+      level: 0,
+      isParent: false,
+      chkDisabled: true,
+      meta: { data: { nodes: asset.nodes } }
+    });
+    expect(treeNodeToAsset(nodes[0]!)).toMatchObject({
+      id: "asset-1",
+      name: "web-1",
+      address: "10.0.0.1",
+      comment: asset.comment,
+      org_id: "org-1",
+      isActive: false,
+      platform: "Ubuntu",
+      category: "host",
+      type: "linux"
+    });
+    expect(nodes[1]?.meta?.data?.nodes).toBeUndefined();
+    expect(getAssetTree).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch another page when an old search completes", async () => {
+    const pending = Promise.withResolvers<unknown>();
+    getAuthorizedAssets.mockReturnValueOnce(pending.promise);
+    const search = startSearch();
+    await vi.advanceTimersByTimeAsync(250);
+    search.query.value = "";
+    await nextTick();
+    pending.resolve({ results: [{ id: "old-asset" }], next: "/next" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getAuthorizedAssets).toHaveBeenCalledOnce();
+    expect(search.nodes.value).toEqual([]);
+  });
+
+  it("loads authorization nodes before the first direct asset page", async () => {
+    getAssetTree
+      .mockResolvedValueOnce({
+        results: [{ id: "1:1", name: "Production", isParent: true }],
+        node_pagination: { has_more: false, next: null }
+      })
+      .mockResolvedValueOnce({
+        results: [{ id: "asset-1", name: "web-1", isParent: false }],
+        node_pagination: { has_more: false, next: null },
+        asset_pagination: { has_more: true, next_offset: 100 }
+      });
+    const { fetchAuthorizationTreePage } = useAssetTree();
+    const parent = { id: "1", name: "Default", isParent: true, level: 0 } as AssetTreeNode;
+
+    const page = await fetchAuthorizationTreePage(parent);
+
+    expect(getAssetTree).toHaveBeenNthCalledWith(
+      1,
+      "authorization",
+      { parent_key: "1", node_page_size: 100 },
+      undefined
+    );
+    expect(getAssetTree).toHaveBeenNthCalledWith(
+      2,
+      "authorization",
+      { parent_key: "1", include_nodes: false, include_assets: true, asset_page_size: 100 },
+      undefined
+    );
+    expect(page.nodes).toHaveLength(2);
+    expect(page.nextPage).toEqual({ phase: "assets", assetOffset: 100 });
+  });
+
+  it("recognizes lightweight authorization nodes by their metadata", async () => {
+    getAssetTree.mockResolvedValueOnce({
+      results: [
+        { id: "ungrouped", name: "Ungrouped", meta: { type: "node", data: { id: "ungrouped" } } },
+        { id: "1:2", name: "Child", meta: { type: "node", data: { id: "node-2" } } }
+      ],
+      node_pagination: { has_more: false, next: null }
+    });
+    const { fetchAuthorizationTreePage } = useAssetTree();
+
+    const page = await fetchAuthorizationTreePage();
+
+    expect(page.nodes).toMatchObject([
+      { id: "ungrouped", isParent: true, meta: { type: "node" } },
+      { id: "1:2", isParent: true, meta: { type: "node" } }
+    ]);
+  });
+
+  it("loads counts for every supplied authorization node in one request", async () => {
+    getUserAssetTreeMetrics.mockResolvedValueOnce({
+      results: [
+        { type: "node", id: "ungrouped", count: 3 },
+        { type: "node", id: "node-2", count: 8 }
+      ]
+    });
+    const { fetchAuthorizationTreeMetrics } = useAssetTree();
+    const nodes = [
+      {
+        id: "ungrouped",
+        name: "Ungrouped",
+        meta: { type: "node", data: { id: "ungrouped" } }
+      },
+      { id: "1:2", name: "Child", meta: { type: "node", data: { id: "node-2" } } },
+      { id: "asset-1", name: "Asset", meta: { type: "asset" } }
+    ] as AssetTreeNode[];
+
+    const counts = await fetchAuthorizationTreeMetrics(nodes);
+
+    expect(getUserAssetTreeMetrics).toHaveBeenCalledExactlyOnceWith(
+      [
+        { type: "node", id: "ungrouped" },
+        { type: "node", id: "node-2" }
+      ],
+      undefined
+    );
+    expect(Object.fromEntries(counts)).toEqual({ ungrouped: 3, "node-2": 8 });
+  });
+
+  it("loads type-tree assets in pages of 100", async () => {
+    getAssetTree.mockResolvedValueOnce({
+      results: [{ id: "asset-1", name: "linux-1", meta: { type: "asset" } }],
+      asset_pagination: { has_more: true, next_offset: 100 }
+    });
+    const { fetchTypeTreePage } = useAssetTree();
+    const parent = {
+      id: "ROOT_HOST_LINUX",
+      name: "Linux",
+      isParent: true,
+      level: 1,
+      type: "linux",
+      category: "host"
+    } as AssetTreeNode;
+
+    const page = await fetchTypeTreePage(parent);
+
+    expect(getAssetTree).toHaveBeenCalledExactlyOnceWith(
+      "type",
+      { type: "linux", category: "host", asset_page_size: 100 },
+      undefined
+    );
+    expect(page.nodes).toHaveLength(1);
+    expect(page.nextPage).toEqual({ phase: "assets", assetOffset: 100 });
+  });
+
+  it("uses the explicit platform type when opening a connection", () => {
+    const { treeNodeToAsset } = useAssetTree();
+    const asset = treeNodeToAsset({
+      id: "asset-1",
+      name: "Network device",
+      meta: { data: { platform: "Cisco", platform_type: "general", type: { value: "cisco" } } }
+    });
+
+    expect(asset).toMatchObject({ platform: "Cisco", type: "general" });
+  });
+});

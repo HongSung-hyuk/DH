@@ -1,0 +1,170 @@
+<template>
+  <GenericListPage
+    ref="GenericListPage"
+    :header-actions="headerActions"
+    :help-tip="helpMsg"
+    :table-config="tableConfig"
+    :title="$t('OnlineUserDevices')"
+  />
+</template>
+
+<script>
+import { GenericListPage } from '@/layout/components'
+import { DetailFormatter } from '@/components/Table/TableFormatters'
+import SessionExpiryFormatter from '@/components/Table/TableFormatters/SessionExpiryFormatter.vue'
+
+export default {
+  components: {
+    GenericListPage
+  },
+  data() {
+    const vm = this
+    return {
+      helpMsg: this.$t('OnlineSessionHelpMsg'),
+      tableConfig: {
+        permissions: {
+          app: 'audits',
+          resource: 'usersession'
+        },
+        url: '/api/v1/audits/user-sessions/',
+        columnsExclude: ['backend', 'user', 'is_current_user_session', 'session_policy'],
+        columnsShow: {
+          min: ['user_display', 'actions'],
+          default: [
+            'user_display',
+            'type',
+            'backend_display',
+            'city',
+            'date_created',
+            'date_expired',
+            'is_active',
+            'is_locked',
+            'actions'
+          ]
+        },
+        columns: [
+          'user_display',
+          'ip',
+          'backend_display',
+          'city',
+          'type',
+          'date_created',
+          'is_active',
+          'is_locked',
+          'date_expired',
+          'user_agent',
+          'actions'
+        ],
+        columnsMeta: {
+          date_expired: {
+            label: this.$t('OnlineSessionPolicy.Expires'),
+            formatter: SessionExpiryFormatter,
+            minWidth: 190,
+            sortable: false
+          },
+          is_locked: {
+            label: this.$t('DeviceLocked'),
+            sortable: false,
+            formatterArgs: {
+              showText: false,
+              showFalse: false
+            }
+          },
+          is_active: {
+            label: this.$t('Active'),
+            formatterArgs: {
+              showText: false,
+              showFalse: false
+            }
+          },
+          user_display: {
+            label: this.$t('User'),
+            formatter: DetailFormatter,
+            formatterArgs: {
+              drawer: true,
+              can: this.$hasPerm('users.view_user'),
+              getTitle: ({ row }) => {
+                return row.user.name
+              },
+              getDrawerTitle({ row }) {
+                return row.user.name
+              },
+              getRoute: ({ row }) => {
+                return {
+                  name: 'UserDetail',
+                  params: {
+                    id: row.user.id
+                  }
+                }
+              }
+            }
+          },
+          actions: {
+            formatterArgs: {
+              hasDelete: false,
+              hasUpdate: false,
+              hasClone: false,
+              extraActions: [
+                {
+                  name: 'OfflineSession',
+                  title: this.$t('Offline'),
+                  icon: 'fa-solid fa-power-off',
+                  can: ({ row }) => {
+                    return vm.$hasPerm('audits.offline_usersession') && !row.is_current_user_session
+                  },
+                  type: 'danger',
+                  callback: ({ row }) => {
+                    this.$axios
+                      .post('/api/v1/audits/user-sessions/offline/', { ids: [row.id] })
+                      .then(() => {
+                        vm.$message.success(this.$tc('OfflineSuccessMsg'))
+                        vm.$refs.GenericListPage.$refs.ListTable.$refs.ListTable.reloadTable()
+                      })
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      headerActions: {
+        hasExport: false,
+        hasImport: false,
+        hasCreate: false,
+        hasBulkDelete: false,
+        hasLeftActions: true,
+        hasRightActions: true,
+        extraMoreActions: [
+          {
+            name: 'OfflineSelected',
+            title: this.$t('OfflineSelected'),
+            type: 'danger',
+            icon: 'clean',
+            can: ({ selectedRows }) => {
+              return selectedRows.length > 0 && vm.$hasPerm('audits.offline_usersession')
+            },
+            callback: function ({ selectedRows }) {
+              vm.$axios
+                .post('/api/v1/audits/user-sessions/offline/', {
+                  ids: selectedRows.map((v) => {
+                    return v.id
+                  })
+                })
+                .then((res) => {
+                  vm.$message.success(vm.$tc('OfflineSuccessMsg'))
+                  vm.$refs.GenericListPage.$refs.ListTable.$refs.ListTable.reloadTable()
+                })
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+</script>
+
+<style lang="scss" scoped>
+.cell a {
+  color: var(--color-info);
+}
+</style>

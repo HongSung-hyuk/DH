@@ -1,0 +1,86 @@
+import { describe, expect, it } from "vitest";
+import { resolveAssetIconFromCandidates, resolveAssetIconFromFields, resolveAssetIconSrc } from "./assetIcon";
+
+describe("asset icon URLs", () => {
+  it("uses the Nuxt app base URL for public icons", () => {
+    expect(resolveAssetIconSrc("linux", "/luna/")).toBe("/luna/icons/linux.svg");
+    expect(resolveAssetIconFromFields({ platform: "PostgreSQL" }, "/luna/").src).toBe("/luna/icons/postgre.svg");
+  });
+
+  it("keeps root-hosted icon URLs unchanged", () => {
+    expect(resolveAssetIconSrc("windows")).toBe("/icons/windows.svg");
+  });
+
+  it.each([
+    ["MySQL", "mysql.svg"],
+    ["MariaDB", "mariadb.svg"],
+    ["Oracle", "oracle.svg"],
+    ["SQLServer", "sqlserver.svg"],
+    ["PostgreSQL", "postgre.svg"],
+    ["Redis", "redis.svg"],
+    ["MongoDB", "mongodb.svg"],
+    ["ClickHouse", "clickhouse.svg"],
+    ["Dameng", "dameng.png"],
+    ["DB2", "db2.png"],
+    ["IBM DB2", "db2.png"],
+    ["Linux", "linux.svg"],
+    ["macOS", "macos.svg"],
+    ["Windows", "windows.svg"],
+    ["Windows_AD", "windows.svg"],
+    ["Website", "chrome.svg"],
+    ["Kubernetes", "kubernetes.svg"],
+    ["K8s", "kubernetes.svg"]
+  ])("uses the same icon for %s in asset and favorite trees", (platform, filename) => {
+    const icon = resolveAssetIconFromFields({ platform }, "/luna/");
+    expect(icon.src).toBe(`/luna/icons/${filename}`);
+    expect(resolveAssetIconFromCandidates([undefined, platform, "asset"], "/luna/")).toEqual(icon);
+    expect(resolveAssetIconSrc(platform, "/luna/")).toBe(icon.src);
+  });
+
+  it("keeps unix platforms on the linux icon", () => {
+    expect(resolveAssetIconFromFields({ platform: "Unix", type: "unix" }).src).toBe("/icons/linux.svg");
+    expect(resolveAssetIconFromCandidates(["BSD", "unix", "host"]).src).toBe("/icons/linux.svg");
+  });
+
+  it("keeps a known database vendor ahead of the generic database category", () => {
+    expect(resolveAssetIconFromFields({ platform: "MySQL", category: "database" }).src).toBe("/icons/mysql.svg");
+    expect(resolveAssetIconFromFields({ platform: "IBM DB2", category: "database" }).src).toBe("/icons/db2.png");
+  });
+
+  it("keeps database vendors ahead of web hints in tree labels", () => {
+    expect(resolveAssetIconFromCandidates(["PostgreSQL", "database", "web-db"]).src).toBe("/icons/postgre.svg");
+  });
+
+  it("uses a generic database icon when no vendor is known", () => {
+    expect(resolveAssetIconFromFields({ category: "database" })).toEqual({
+      src: "",
+      fallback: "i-tabler-database-filled"
+    });
+    expect(resolveAssetIconSrc("database")).toBe("");
+  });
+
+  it.each([
+    ["H3C", "h3c", "h3c.png"],
+    ["Cisco", "cisco", "cisco.svg"],
+    ["Huawei", "huawei", "huawei.png"]
+  ])("uses the %s brand icon only for the matching platform type", (platform, type, filename) => {
+    const icon = { src: `/luna/icons/${filename}`, fallback: "i-lucide-router" };
+    expect(resolveAssetIconFromFields({ platform: "Renamed device", type, category: "device" }, "/luna/")).toEqual(
+      icon
+    );
+    expect(resolveAssetIconFromFields({ platform, type: "general", category: "device" }, "/luna/").src).toBe("");
+    expect(resolveAssetIconFromFields({ type: "general" }, "/luna/", [platform, "switch"]).src).toBe("");
+    expect(resolveAssetIconSrc(type, "/luna/")).toBe(icon.src);
+  });
+
+  it("requires the complete device platform type", () => {
+    expect(resolveAssetIconFromFields({ type: "cisco-test", category: "device" }).src).toBe("");
+  });
+
+  it("keeps the generic network icon for general devices with a custom name", () => {
+    expect(resolveAssetIconFromFields({ type: "general", category: "device" }, "/", ["Windows gateway"])).toEqual({
+      src: "",
+      fallback: "i-lucide-router"
+    });
+  });
+});

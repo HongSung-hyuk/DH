@@ -1,0 +1,72 @@
+<template>
+  <TabPage v-model:active-menu="activeMenu" :submenu="tab.submenu" :help-message="helpMessage" />
+</template>
+
+<script>
+import TabPage from '@/layout/components/TabPage'
+
+export default {
+  name: 'Integration',
+  components: {
+    TabPage
+  },
+  data() {
+    return {
+      activeMenu: 'application',
+      tab: {
+        submenu: [
+          {
+            name: 'application',
+            title: this.$t('Applications'),
+            hidden: !this.$hasPerm('accounts.view_integrationapplication'),
+            component: () => import('@/views/accounts/Integration/ApplicationList.vue')
+          },
+          {
+            name: 'rotations',
+            title: this.$t('AlternatingAccountRotation'),
+            hidden: !this.$hasPerm('accounts.view_applicationcredential'),
+            component: () => import('@/views/accounts/Integration/RotationList.vue')
+          },
+          {
+            name: 'records',
+            title: this.$t('ApplicationCallLogs'),
+            hidden: !this.$hasPerm('audits.view_integrationapplicationlog'),
+            component: () =>
+              import('@/views/accounts/Integration/components/ApplicationCallLog.vue')
+          },
+          {
+            name: 'events',
+            title: this.$t('ApplicationEventLogs'),
+            hidden: !this.$hasPerm('audits.view_integrationapplicationlog'),
+            component: () =>
+              import('@/views/accounts/Integration/components/ApplicationEventLog.vue')
+          },
+          {
+            name: 'activities',
+            title: this.$t('ApplicationActivityLogs'),
+            hidden: !this.$hasPerm('audits.view_integrationapplicationlog'),
+            component: () => import('@/views/accounts/Integration/components/ApplicationAudit.vue')
+          },
+          {
+            name: 'docs',
+            title: this.$t('Documentation'),
+            hidden: !this.$hasPerm('accounts.view_integrationapplication'),
+            component: () => import('@/views/accounts/Integration/SDKList.vue')
+          }
+        ]
+      }
+    }
+  },
+  computed: {
+    helpMessage() {
+      if (this.activeMenu === 'application') {
+        return this.$t('IntegrationApplicationsHelp')
+      }
+      if (this.activeMenu === 'rotations') {
+        return this.$t('AlternatingAccountRotationHelp')
+      }
+      return ''
+    }
+  }
+}
+</script>

@@ -1,0 +1,51 @@
+<template>
+  <div v-show="!collapsed">
+    <template v-for="(item, index) in data.items" :key="item.id || index">
+      <slot :name="`id:${item.id}`" />
+      <slot :name="`$id:${item.id}`" />
+      <render-form-item
+        :prop="`${data.id}.${item.id}`"
+        :data="item"
+        :value="value"
+        :item-value="itemValue[item.id]"
+        :disabled="disabled"
+        :readonly="readonly"
+        :options="options[item.id]"
+        @update-value="updateValue"
+      />
+    </template>
+  </div>
+</template>
+<script>
+/* eslint-disable vue/require-default-prop */
+/* eslint-disable vue/require-prop-types */
+
+import { markRaw } from 'vue'
+import RenderFormItem from './render-form-item.vue'
+
+export default {
+  components: {
+    RenderFormItem: markRaw(RenderFormItem)
+  },
+  props: {
+    collapsed: Boolean,
+    data: Object,
+    itemValue: {},
+    value: Object,
+    disabled: Boolean,
+    readonly: Boolean,
+    options: Object
+  },
+  methods: {
+    updateValue({ id, value }) {
+      this.$emit('updateValue', {
+        id: this.data.id,
+        value: {
+          ...this.itemValue,
+          [id]: value
+        }
+      })
+    }
+  }
+}
+</script>

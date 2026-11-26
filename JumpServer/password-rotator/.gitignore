@@ -1,0 +1,4 @@
+/config/
+/secrets/
+/state/
+/__pycache__/
